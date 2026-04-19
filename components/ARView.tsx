@@ -338,7 +338,9 @@ export default function ARView() {
 
                 // Get the current XRFrame for anchor creation
                 const xrFrame = renderer!.xr!.getFrame?.();
-                if (xrFrame) {
+
+                // Safe check: Ensure xrFrame exists and createAnchor API is available on this device
+                if (xrFrame && typeof xrFrame.createAnchor === 'function') {
                     const startAnchor = await xrFrame.createAnchor(startPose, refSpace);
                     const endAnchor = await xrFrame.createAnchor(endPose, refSpace);
 
@@ -384,8 +386,9 @@ export default function ARView() {
                         await persistWallToSupabase(wallId, start, end, nPanels, settingsRef.current.frameColor, null, null);
                     }
                 } else {
-                    console.warn('[Anchor] No XRFrame available — cannot create anchors outside frame callback');
-                    setDebugStatus('⚠️ No XRFrame — static fallback');
+                    const reason = !xrFrame ? 'No XRFrame available' : 'Anchor API unsupported';
+                    console.warn(`[Anchor] ${reason} — cannot create anchors (static fallback)`);
+                    setDebugStatus(`⚠️ ${reason} — static fallback`);
                     await persistWallToSupabase(wallId, start, end, nPanels, settingsRef.current.frameColor, null, null);
                 }
             } catch (err: any) {
@@ -677,12 +680,17 @@ export default function ARView() {
         const hitTestResults = event.frame.getHitTestResults(hitTestSourceRef.current);
         if (hitTestResults.length > 0) {
             const pose = hitTestResults[0].getPose(referenceSpace);
-            (session as any).createAnchor(pose.transform, referenceSpace).then((anchor: any) => {
-                const partition = new ARPartition({ frameColor: settingsRef.current.frameColor, numPanels: settingsRef.current.numPanels });
-                (partition as any).matrixAutoUpdate = false;
-                sceneRef.current?.add(partition);
-                tapAnchorsRef.current.set(anchor, partition);
-            });
+            // Safe check for createAnchor support before tap-to-place
+            if (typeof (session as any).createAnchor === 'function') {
+                (session as any).createAnchor(pose.transform, referenceSpace).then((anchor: any) => {
+                    const partition = new ARPartition({ frameColor: settingsRef.current.frameColor, numPanels: settingsRef.current.numPanels });
+                    (partition as any).matrixAutoUpdate = false;
+                    sceneRef.current?.add(partition);
+                    tapAnchorsRef.current.set(anchor, partition);
+                });
+            } else {
+                console.warn('[Anchor] tap-to-place createAnchor not supported on this session.');
+            }
         }
     }, []);
 

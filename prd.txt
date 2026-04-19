@@ -1,0 +1,1252 @@
+# PartitionAR — AI-Executable Engineering Spec
+
+**Version:** 1.0  
+**Source:** Converted from PRD v1.0  
+**Audience:** AI Coding Agents (Claude Code, Cursor, Codex)  
+**Rule:** Do not modify product logic. Build exactly what is specified.
+
+---
+
+## 0. Agent Instructions
+
+Read this entire file before writing a single line of code.
+Build in the exact execution order defined in Section 6.
+Do not invent features. Do not simplify edge cases.
+Every function contract in Section 3 must be implemented exactly as specified.
+When a section says "skeleton only", fill in the full implementation.
+When a section says "exact", copy the structure precisely.
+
+---
+
+## 1. Module Breakdown
+
+### Module 1 — AR Engine
+**Responsibility:** Manage WebXR session lifecycle, hit-test, frame loop, reference spaces.  
+**Files:** `src/xr/session.js`, `src/xr/hitTest.js`, `src/xr/frameLoop.js`  
+**Dependencies:** None (native WebXR API)
+
+### Module 2 — Drawing Engine
+**Responsibility:** Capture touch strokes on floor plane, run PCA correction, render corrected line, expose endpoint handles.  
+**Files:** `src/xr/drawing.js`, `src/utils/lineCorrection.js`  
+**Dependencies:** Module 1 (AR Engine), math.js
+
+### Module 3 — Anchor System
+**Responsibility:** Create XRAnchor at wall endpoints, update wall transforms each frame, host to Google Cloud Anchors, resolve from Cloud Anchors.  
+**Files:** `src/xr/anchors.js`, `src/api/cloudAnchors.js`  
+**Dependencies:** Module 1 (AR Engine)
+
+### Module 4 — Storage Layer
+**Responsibility:** IndexedDB CRUD for projects, layouts, worlds. Map cloud anchor IDs to wall records.  
+**Files:** `src/db/storage.js`, `src/db/schema.js`  
+**Dependencies:** idb library
+
+### Module 5 — World Generation
+**Responsibility:** Upload video to World Labs, trigger world generation, poll operation, store result URLs.  
+**Files:** `src/api/worldLabs.js`, `src/hooks/useWorldGeneration.js`  
+**Dependencies:** Module 4 (Storage Layer), axios
+
+### Module 6 — UI Layer
+**Responsibility:** All React screens, components, Zustand state, routing, PWA config, Spark world viewer.  
+**Files:** `src/screens/`, `src/components/`, `src/store/useAppStore.js`  
+**Dependencies:** All modules above
+
+---
+
+## 2. File / Folder Structure
+
+```
+partitionAR/
+│
+├── public/
+│   ├── manifest.json
+│   └── icons/
+│       ├── icon-192.png
+│       └── icon-512.png
+│
+├── src/
+│   │
+│   ├── main.jsx                          ← Vite entry, mount App
+│   ├── App.jsx                           ← BrowserRouter + routes + Zustand Provider
+│   │
+│   ├── xr/
+│   │   ├── session.js                    ← startXRSession, endXRSession, checkSupport
+│   │   ├── hitTest.js                    ← initHitTest, getHitTestResult
+│   │   ├── frameLoop.js                  ← startFrameLoop, stopFrameLoop, onFrame cb
+│   │   ├── drawing.js                    ← startStroke, addPoint, endStroke, renderStroke
+│   │   └── anchors.js                    ← createLocalAnchor, updateAnchorMeshes
+│   │
+│   ├── utils/
+│   │   ├── lineCorrection.js             ← correctLine (PCA/SVD), snapAngle, filterOutliers
+│   │   ├── partitionMesh.js              ← buildWallMesh, buildDoorMesh, updateMeshTransform
+│   │   ├── coordinateUtils.js            ← xrPoseToMatrix4, vector3FromXRPose
+│   │   └── mediaRecorder.js             ← startRecording, stopRecording, applyWatermark
+│   │
+│   ├── api/
+│   │   ├── worldLabs.js                  ← uploadVideo, generateWorld, pollOperation, getWorld
+│   │   └── cloudAnchors.js               ← hostAnchor, resolveAnchor, resolveAllAnchors
+│   │
+│   ├── db/
+│   │   ├── schema.js                     ← DB_NAME, DB_VERSION, store names, upgrade fn
+│   │   └── storage.js                    ← saveProject, getProjects, saveLayout, getLayout,
+│   │                                         saveWorld, updateWorldStatus, deleteProject
+│   │
+│   ├── store/
+│   │   └── useAppStore.js                ← Zustand store (full schema in Section 5)
+│   │
+│   ├── hooks/
+│   │   ├── useWebXR.js                   ← session lifecycle hook
+│   │   ├── useHitTest.js                 ← hit-test result hook
+│   │   ├── useDrawing.js                 ← stroke capture + PCA hook
+│   │   ├── useAnchors.js                 ← anchor create/update hook
+│   │   ├── useCloudAnchors.js            ← host/resolve cloud anchors hook
+│   │   └── useWorldGeneration.js         ← upload → generate → poll hook
+│   │
+│   ├── components/
+│   │   ├── ui/
+│   │   │   ├── Button.jsx
+│   │   │   ├── Modal.jsx
+│   │   │   ├── BottomSheet.jsx
+│   │   │   ├── ColorPicker.jsx
+│   │   │   ├── LoadingBar.jsx
+│   │   │   └── ARUnsupportedBanner.jsx
+│   │   ├── ar/
+│   │   │   ├── ARCanvas.jsx              ← Three.js canvas + WebXR renderer
+│   │   │   ├── FloorIndicator.jsx        ← Pulsing circle at hit-test point
+│   │   │   ├── StrokeOverlay.jsx         ← Raw stroke + corrected line + handles
+│   │   │   ├── WallProperties.jsx        ← Height/type/colour selector panel
+│   │   │   └── WallInfoSheet.jsx         ← Slide-up sheet on wall tap
+│   │   └── world/
+│   │       ├── WorldCanvas.jsx           ← Spark SplatMesh + SparkControls
+│   │       ├── PartitionOverlay.jsx      ← Wall meshes in 3D world scene
+│   │       └── ShareCard.jsx             ← Shareable link + WhatsApp CTA
+│   │
+│   └── screens/
+│       ├── HomeScreen.jsx                ← Project list + new project button
+│       ├── ProjectScreen.jsx             ← Mode 1/2/3 selector cards
+│       ├── DrawScreen.jsx                ← Mode 1: AR canvas + drawing UI
+│       ├── LiveARScreen.jsx              ← Mode 2: AR canvas + resolved walls
+│       ├── GeneratingScreen.jsx          ← Mode 3: progress polling UI
+│       └── WorldScreen.jsx              ← Mode 3: Spark joystick world
+│
+├── .env.local                            ← VITE_WORLD_LABS_API_KEY, VITE_GOOGLE_CLOUD_API_KEY
+├── vite.config.js                        ← PWA plugin config
+├── tailwind.config.js
+└── package.json
+```
+
+---
+
+## 3. Function-Level Contracts
+
+### 3.1 AR Engine — `src/xr/session.js`
+
+```typescript
+checkXRSupport(): Promise<{
+  arSupported: boolean,
+  anchorsSupported: boolean,
+  hitTestSupported: boolean
+}>
+// Side effects: none
+// On false: set store.arSupported = false → triggers ARUnsupportedBanner
+
+startXRSession(canvasRef: RefObject<HTMLCanvasElement>): Promise<XRSession>
+// Inputs: React ref to Three.js canvas element
+// Outputs: active XRSession
+// Side effects:
+//   - Sets store.xrSession
+//   - Calls initHitTest(session)
+//   - Calls startFrameLoop(session, renderer)
+// Error: if requestSession throws → set store.xrError = error.message
+
+endXRSession(): Promise<void>
+// Inputs: none (reads store.xrSession)
+// Outputs: none
+// Side effects:
+//   - Calls session.end()
+//   - Sets store.xrSession = null
+//   - Calls stopFrameLoop()
+//   - Saves layout to IndexedDB
+```
+
+### 3.2 AR Engine — `src/xr/hitTest.js`
+
+```typescript
+initHitTest(session: XRSession): Promise<XRHitTestSource>
+// Inputs: active XRSession
+// Outputs: XRHitTestSource stored in module-level variable
+// Side effects: stores hitTestSource for use in frame loop
+
+getHitTestResult(xrFrame: XRFrame, refSpace: XRReferenceSpace): {
+  position: Vector3 | null,
+  orientation: Quaternion | null,
+  matrix: Matrix4 | null
+}
+// Inputs: current XRFrame, local-floor reference space
+// Outputs: hit position in world space, or null if no floor detected
+// Side effects: none
+// Called every frame — must complete in < 1ms
+```
+
+### 3.3 Drawing Engine — `src/xr/drawing.js`
+
+```typescript
+startStroke(position: Vector3): void
+// Inputs: first touch position projected onto floor plane
+// Side effects:
+//   - Initialises store.currentStroke = { rawPoints: [position], startTime: Date.now() }
+//   - Starts 10ms interval to collect positions
+
+addPoint(position: Vector3): void
+// Inputs: current touch position projected onto floor plane
+// Side effects:
+//   - Appends position to store.currentStroke.rawPoints
+//   - Calls renderRawStroke(store.currentStroke.rawPoints)
+
+endStroke(): CorrectedLine | null
+// Inputs: none (reads store.currentStroke)
+// Outputs: { start: Vector3, end: Vector3, length: number, angle: number } | null
+// Returns null if stroke length < 0.3m
+// Side effects:
+//   - Clears 10ms interval
+//   - Calls correctLine(store.currentStroke.rawPoints)
+//   - Calls snapAngle(correctedLine)
+//   - Sets store.pendingLine = correctedLine
+//   - Calls renderCorrectedLine(correctedLine)
+//   - Resets store.currentStroke = null
+
+renderRawStroke(points: Vector3[]): void
+// Inputs: array of raw points
+// Side effects: updates Three.js LineSegments geometry in scene — no state change
+
+renderCorrectedLine(line: CorrectedLine): void
+// Inputs: corrected line with start/end
+// Side effects:
+//   - Removes raw stroke from scene
+//   - Adds corrected line (white, dashed) to scene
+//   - Adds two endpoint Mesh handles (spheres, radius 0.03m) at start and end
+//   - Endpoint meshes are raycaster-interactive for drag adjustment
+```
+
+### 3.4 Line Correction — `src/utils/lineCorrection.js`
+
+```typescript
+filterOutliers(points: {x: number, z: number}[]): {x: number, z: number}[]
+// Remove points > 2 standard deviations from centroid
+// Returns filtered array
+
+correctLine(points3D: Vector3[]): CorrectedLine | null
+// Inputs: raw Vector3 array (use only X and Z — ignore Y)
+// Outputs: { start: Vector3, end: Vector3, length: number, angle: number }
+// Algorithm:
+//   1. Map to 2D: pts = points3D.map(p => [p.x, p.z])
+//   2. Call filterOutliers(pts)
+//   3. Compute centroid: cx = mean(pts.x), cz = mean(pts.z)
+//   4. Center points: centered = pts.map(p => [p[0]-cx, p[1]-cz])
+//   5. Build 2x2 covariance matrix
+//   6. Run math.svd(covMatrix) → U, S, V
+//   7. First column of V = dominant direction [dx, dz]
+//   8. Project all points: proj[i] = pts[i][0]*dx + pts[i][1]*dz
+//   9. minP = min(proj), maxP = max(proj)
+//   10. start = { x: cx + minP*dx, y: floorY, z: cz + minP*dz }
+//   11. end   = { x: cx + maxP*dx, y: floorY, z: cz + maxP*dz }
+//   12. length = distance(start, end)
+//   13. angle = Math.atan2(dz, dx) * (180 / Math.PI)
+//   14. Return { start, end, length, angle }
+// Fallback (SVD fails or < 5 points): return first-to-last raw points
+
+snapAngle(line: CorrectedLine): CorrectedLine
+// Inputs: corrected line
+// Outputs: same line with angle snapped if within threshold
+// Snap targets: 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
+// Threshold: 8 degrees
+// If snap: rotate end point around start point to exact snap angle
+// Return new line object (do not mutate input)
+```
+
+### 3.5 Partition Mesh — `src/utils/partitionMesh.js`
+
+```typescript
+buildWallMesh(wall: WallRecord): THREE.Group
+// Inputs: wall record from store
+// Outputs: Three.js Group containing:
+//   - Main slab: BoxGeometry(length, height, 0.075)
+//   - Panel lines: LineSegments every 0.6m along length
+//   - Material: MeshStandardMaterial based on wall.type
+//     solid: { color: wall.colour, roughness: 0.8 }
+//     glass: { color: 0xaaddff, transparent: true, opacity: 0.4 }
+//     mesh:  { color: wall.colour, wireframe: true }
+//     half:  height = wall.height / 2, same as solid
+// Side effects: none
+// Note: mesh is centred at origin — caller positions it
+
+updateMeshTransform(
+  mesh: THREE.Group,
+  startPose: XRPose,
+  endPose: XRPose
+): void
+// Inputs: mesh Group, start anchor pose, end anchor pose
+// Side effects:
+//   - Computes midpoint between start and end poses
+//   - Sets mesh.position to midpoint
+//   - Computes angle between start and end on XZ plane
+//   - Sets mesh.rotation.y to that angle
+//   - Sets mesh.scale if length changed (endpoint drag)
+
+buildDoorMesh(panel: PanelRecord, wallHeight: number): THREE.Group
+// Outputs: Group with:
+//   - Frame: 4 BoxGeometry bars forming rectangle (0.05m thick)
+//   - Slab: BoxGeometry(0.55, wallHeight - 0.1, 0.04) — the door panel
+//   - Handle: CylinderGeometry(0.01, 0.01, 0.12) at 1.0m height, 0.05m from edge
+//   - Hinge side: determined by panel.doorSide ('left' | 'right')
+// Door open animation: rotate slab Group on Y axis 0→-90° in 400ms (use framer-motion spring or manual lerp)
+```
+
+### 3.6 Anchor System — `src/xr/anchors.js`
+
+```typescript
+createLocalAnchor(
+  xrFrame: XRFrame,
+  position: Vector3,
+  refSpace: XRReferenceSpace
+): Promise<XRAnchor>
+// Inputs: current frame, floor position, local-floor reference space
+// Outputs: XRAnchor
+// Algorithm:
+//   1. pose = new XRRigidTransform(position, {x:0,y:0,z:0,w:1})
+//   2. anchor = await xrFrame.createAnchor(pose, refSpace)
+//   3. Return anchor
+// Error: wrap in try/catch — return null on failure, set store.anchorError
+
+updateAllAnchorMeshes(
+  xrFrame: XRFrame,
+  refSpace: XRReferenceSpace,
+  walls: WallRecord[],
+  meshMap: Map<string, THREE.Group>
+): void
+// Called every frame in animation loop
+// For each wall:
+//   startPose = xrFrame.getPose(wall.startAnchor.anchorSpace, refSpace)
+//   endPose   = xrFrame.getPose(wall.endAnchor.anchorSpace, refSpace)
+//   if (startPose && endPose) → updateMeshTransform(meshMap.get(wall.id), startPose, endPose)
+// Side effects: updates mesh positions in scene
+// Must complete in < 2ms total for all walls
+```
+
+### 3.7 Cloud Anchors — `src/api/cloudAnchors.js`
+
+```typescript
+hostAnchor(
+  xrAnchor: XRAnchor,
+  session: XRSession
+): Promise<string | null>
+// Inputs: local XRAnchor, active XRSession
+// Outputs: cloudAnchorId string | null on failure
+// Algorithm:
+//   1. cloudId = await session.hostCloudAnchor(xrAnchor, { daysToExpire: 365 })
+//   2. Return cloudId
+// Error handling:
+//   catch → return null, log error code to store.anchorErrors[]
+// Prerequisite: call estimateAnchorQuality first — skip hosting if 'insufficient'
+
+resolveAnchor(
+  cloudAnchorId: string,
+  session: XRSession,
+  timeoutMs: number = 30000
+): Promise<XRAnchor | null>
+// Inputs: cloud anchor ID string, active XRSession, timeout in ms
+// Outputs: resolved XRAnchor | null on timeout/failure
+// Algorithm:
+//   1. anchor = await session.resolveCloudAnchor(cloudAnchorId)
+//   2. Poll anchor.cloudAnchorState every 500ms
+//   3. If state === 'success' → return anchor
+//   4. If state includes 'error' → return null
+//   5. If timeout exceeded → return null
+// Side effects: none
+
+resolveAllAnchors(
+  walls: WallRecord[],
+  session: XRSession
+): Promise<Map<string, { start: XRAnchor | null, end: XRAnchor | null }>>
+// Inputs: wall records array, active XRSession
+// Outputs: Map of wallId → { startAnchor, endAnchor }
+// Algorithm: run all resolveAnchor calls in parallel (Promise.allSettled)
+// Do NOT await sequentially — all resolve concurrently
+```
+
+### 3.8 Storage — `src/db/storage.js`
+
+```typescript
+// DB initialisation (call once at app start)
+initDB(): Promise<IDBDatabase>
+// Opens 'partitionAR_db' version 1
+// Creates stores: projects, layouts, worlds, sessions
+// Returns db instance stored in module-level variable
+
+saveProject(project: ProjectRecord): Promise<void>
+getProjects(): Promise<ProjectRecord[]>
+getProject(id: string): Promise<ProjectRecord | undefined>
+deleteProject(id: string): Promise<void>
+// All use projects object store, keyPath: id
+
+saveLayout(layout: LayoutRecord): Promise<void>
+getLayout(id: string): Promise<LayoutRecord | undefined>
+getLayoutsByProject(projectId: string): Promise<LayoutRecord[]>
+updateLayout(id: string, partial: Partial<LayoutRecord>): Promise<void>
+// layouts store, keyPath: id, index: projectId
+
+saveWorld(world: WorldRecord): Promise<void>
+updateWorldStatus(
+  worldId: string,
+  status: 'uploading'|'generating'|'ready'|'failed',
+  data?: Partial<WorldRecord>
+): Promise<void>
+getWorldsByLayout(layoutId: string): Promise<WorldRecord[]>
+// worlds store, keyPath: id, index: layoutId
+```
+
+### 3.9 World Labs API — `src/api/worldLabs.js`
+
+```typescript
+uploadVideo(blob: Blob): Promise<{ mediaAssetId: string }>
+// 1. POST /media-assets → get { media_asset: { id }, upload_info: { upload_url } }
+// 2. PUT blob to upload_url with header x-goog-content-length-range: "0,1048576000"
+// 3. Return { mediaAssetId: media_asset.id }
+// Retry: 3 attempts on PUT failure with 2s delay
+
+generateWorld(
+  mediaAssetId: string,
+  displayName: string,
+  textPrompt: string
+): Promise<{ operationId: string }>
+// POST /worlds:generate
+// Body: { display_name, world_prompt: { type: "video", video_prompt: { source: "media_asset", media_asset_id }, text_prompt } }
+// Return { operationId: response.operation_id }
+
+pollOperation(
+  operationId: string,
+  onProgress: (status: string, description: string) => void
+): Promise<WorldLabsWorldResponse>
+// GET /operations/{operationId} every 10 seconds
+// Call onProgress with metadata.progress.status + description each poll
+// Stop when done === true
+// Timeout: 15 minutes (90 polls) → throw Error('timeout')
+// On done: return response field of operation
+
+type WorldLabsWorldResponse = {
+  worldId: string
+  splatUrl500k: string
+  splatUrlFullRes: string
+  colliderMeshUrl: string
+  panoramaUrl: string
+  worldMarbleUrl: string
+}
+```
+
+### 3.10 Media Recorder — `src/utils/mediaRecorder.js`
+
+```typescript
+startRecording(canvas: HTMLCanvasElement): Promise<void>
+// 1. stream = canvas.captureStream(30)
+// 2. mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' })
+// 3. chunks = []
+// 4. mediaRecorder.ondataavailable = e => chunks.push(e.data)
+// 5. mediaRecorder.start(1000) // 1s timeslice
+// Side effects: stores mediaRecorder and chunks in module scope
+
+stopRecording(): Promise<Blob>
+// 1. mediaRecorder.stop()
+// 2. On stop: blob = new Blob(chunks, { type: 'video/webm' })
+// 3. Return blob
+
+applyWatermark(blob: Blob, text: string): Promise<Blob>
+// 1. Create offscreen canvas matching blob dimensions
+// 2. Draw video frames via VideoDecoder or HTMLVideoElement
+// 3. Draw text watermark bottom-right: font 14px, white with black shadow
+// 4. Re-encode to Blob via MediaRecorder on offscreen canvas stream
+// Return watermarked blob
+// Note: This is complex — if VideoDecoder not available, skip re-encode, use simple overlay div instead
+```
+
+---
+
+## 4. API Contracts
+
+### 4.1 World Labs API
+
+**Base URL:** `https://api.worldlabs.ai/marble/v1`  
+**Auth header:** `Authorization: Bearer ${import.meta.env.VITE_WORLD_LABS_API_KEY}`
+
+#### POST /media-assets
+```
+Request:
+  Content-Type: application/json
+  Body: { "file_name": "ar_session.mp4", "kind": "video", "extension": "mp4" }
+
+Response 200:
+  {
+    "media_asset": { "id": "uuid", "file_name": "ar_session.mp4", "kind": "video" },
+    "upload_info": {
+      "upload_url": "https://storage.googleapis.com/...",
+      "upload_method": "PUT",
+      "required_headers": { "x-goog-content-length-range": "0,1048576000" }
+    }
+  }
+
+Error states:
+  401 → invalid API key → throw Error('WORLD_LABS_AUTH_FAILED')
+  429 → rate limited → wait 60s, retry once
+  500 → server error → throw Error('WORLD_LABS_SERVER_ERROR')
+```
+
+#### PUT {upload_url}
+```
+Request:
+  Headers: { "x-goog-content-length-range": "0,1048576000" }
+  Body: raw video Blob (binary)
+
+Response: 200 empty body on success
+Error: any non-200 → retry up to 3x with 2s delay
+```
+
+#### POST /worlds:generate
+```
+Request:
+  Content-Type: application/json
+  Body: {
+    "display_name": string,
+    "world_prompt": {
+      "type": "video",
+      "video_prompt": {
+        "source": "media_asset",
+        "media_asset_id": string
+      },
+      "text_prompt": string
+    }
+  }
+
+Response 200:
+  { "operation_id": "uuid" }
+
+Error states:
+  400 → bad request (invalid media_asset_id) → throw Error('WORLD_LABS_BAD_REQUEST')
+  402 → insufficient credits → throw Error('WORLD_LABS_QUOTA_EXCEEDED')
+```
+
+#### GET /operations/{operation_id}
+```
+Response (pending):
+  {
+    "done": false,
+    "metadata": {
+      "progress": { "status": "RUNNING", "description": "Processing video..." }
+    }
+  }
+
+Response (complete):
+  {
+    "done": true,
+    "error": null,
+    "response": {
+      "id": "world-uuid",
+      "world_marble_url": "https://marble.worldlabs.ai/world/...",
+      "assets": {
+        "splats": { "spz_urls": { "500k": "url", "full_res": "url" } },
+        "mesh": { "collider_mesh_url": "url" },
+        "imagery": { "pano_url": "url" }
+      }
+    }
+  }
+
+Response (failed):
+  { "done": true, "error": "Generation failed: insufficient visual data" }
+  → throw Error with error string
+```
+
+### 4.2 Google Cloud Anchors (WebXR Session Methods)
+
+```
+session.hostCloudAnchor(xrAnchor, { daysToExpire: 365 })
+  → Promise<string>  (cloudAnchorId)
+  → Requires OAuth keyless auth (not API key for 365d TTL)
+  → Error codes: 'insufficient_visual_data' | 'service_unavailable' | 'network_error'
+
+session.resolveCloudAnchor(cloudAnchorId)
+  → Promise<XRAnchor>
+  → Poll anchor.cloudAnchorState:
+      'pending'              → keep polling
+      'success'              → resolved, use anchor
+      'error_not_localized'  → user needs to move camera
+      'error_not_found'      → anchor expired or invalid
+      'error_cloud_service'  → Google API error
+
+xrAnchor.cloudAnchorState
+  → string, read each frame or on interval
+```
+
+---
+
+## 5. State Management Design
+
+### Zustand Store — `src/store/useAppStore.js`
+
+```typescript
+type AppState = {
+  // Projects
+  projects: ProjectRecord[]
+  currentProject: ProjectRecord | null
+
+  // Layout
+  currentLayout: LayoutRecord | null
+  walls: WallRecord[]           // walls in current layout
+  pendingLine: CorrectedLine | null  // line drawn, awaiting confirm
+
+  // AR Session
+  xrSession: XRSession | null
+  xrRefSpace: XRReferenceSpace | null
+  arSupported: boolean
+  xrError: string | null
+
+  // Drawing
+  isDrawing: boolean
+  currentStroke: { rawPoints: Vector3[], startTime: number } | null
+  selectedWall: WallRecord | null
+
+  // Anchors
+  localAnchors: Map<string, { start: XRAnchor, end: XRAnchor }>
+  anchorErrors: string[]
+
+  // World Generation
+  worldGenStatus: 'idle' | 'uploading' | 'generating' | 'ready' | 'error'
+  worldGenProgress: { status: string, description: string } | null
+  currentWorld: WorldRecord | null
+
+  // UI
+  activeModal: 'wallProperties' | 'doorConfirm' | 'shareCard' | null
+  wallPropertiesDraft: { height: number, type: string, colour: string }
+
+  // Actions
+  setCurrentProject: (p: ProjectRecord) => void
+  setCurrentLayout: (l: LayoutRecord) => void
+  addWall: (w: WallRecord) => void
+  updateWall: (id: string, partial: Partial<WallRecord>) => void
+  removeWall: (id: string) => void
+  setXRSession: (s: XRSession | null) => void
+  setXRRefSpace: (rs: XRReferenceSpace | null) => void
+  setPendingLine: (l: CorrectedLine | null) => void
+  setIsDrawing: (v: boolean) => void
+  setSelectedWall: (w: WallRecord | null) => void
+  addLocalAnchor: (wallId: string, anchors: { start: XRAnchor, end: XRAnchor }) => void
+  setWorldGenStatus: (s: AppState['worldGenStatus']) => void
+  setWorldGenProgress: (p: { status: string, description: string }) => void
+  setCurrentWorld: (w: WorldRecord) => void
+  setActiveModal: (m: AppState['activeModal']) => void
+}
+```
+
+### State Transitions
+
+```
+APP START:
+  arSupported = false
+  → checkXRSupport() → arSupported = true/false
+
+SESSION START (Draw/Preview):
+  xrSession = null → startXRSession() → xrSession = XRSession
+  xrError = null
+
+DRAWING:
+  isDrawing = false
+  → touchstart → isDrawing = true, currentStroke = { rawPoints: [], startTime }
+  → touchend → endStroke() → pendingLine = CorrectedLine | null
+  → confirm → pendingLine cleared, wall added to walls[]
+
+WALL CONFIRMED:
+  walls = [...walls, newWall]
+  localAnchors.set(wall.id, { start, end })
+  → hostAnchor() → wall.cloudAnchorIdStart + cloudAnchorIdEnd updated
+  → saveLayout() to IndexedDB
+
+WORLD GEN:
+  worldGenStatus: idle → uploading → generating → ready | error
+  worldGenProgress updated each poll
+
+SESSION END:
+  xrSession = null
+  isDrawing = false
+  currentStroke = null
+  pendingLine = null
+```
+
+---
+
+## 6. Execution Order
+
+**AGENT: Build in this exact order. Do not skip ahead. Each step depends on the previous.**
+
+### Step 1 — Project Scaffold
+```
+1a. npm create vite@latest partitionAR -- --template react
+1b. Install ALL packages:
+      three @sparkjsdev/spark
+      zustand react-router-dom axios
+      framer-motion idb mathjs uuid
+      tailwindcss postcss autoprefixer
+      vite-plugin-pwa workbox-window
+1c. Configure tailwind.config.js (content: ['./src/**/*.{jsx,js}'])
+1d. Configure vite.config.js with VitePWA plugin:
+      registerType: 'autoUpdate'
+      includeAssets: ['icons/*']
+      manifest: { name, short_name, theme_color, icons }
+1e. Create .env.local with empty keys
+1f. Create ALL empty files in folder structure (Section 2) — no content yet
+1g. Set up React Router in App.jsx with all 6 routes
+1h. Create all 6 screen components with placeholder divs
+1i. Create bottom navigation bar component
+1j. Test: npm run dev -- --host → open on phone → 6 screens accessible
+```
+
+### Step 2 — Zustand Store
+```
+2a. Implement full useAppStore.js (Section 5 schema — all fields + all actions)
+2b. Wrap App.jsx in no provider needed (Zustand is external)
+2c. Test: import store in HomeScreen, add test project, verify state updates
+```
+
+### Step 3 — IndexedDB Storage Layer
+```
+3a. Implement schema.js:
+      DB_NAME = 'partitionAR_db', VERSION = 1
+      Define upgrade fn creating 4 object stores with indexes
+3b. Implement storage.js with all functions (Section 3.8)
+3c. Call initDB() in main.jsx before rendering App
+3d. Test: saveProject → getProjects → verify data in DevTools > Application > IndexedDB
+```
+
+### Step 4 — WebXR Session + Hit-Test
+```
+4a. Implement checkXRSupport() in session.js
+4b. Implement startXRSession(canvasRef) in session.js
+4c. Implement initHitTest() and getHitTestResult() in hitTest.js
+4d. Implement startFrameLoop() and stopFrameLoop() in frameLoop.js:
+      renderer.setAnimationLoop((time, xrFrame) => {
+        const hitResult = getHitTestResult(xrFrame, refSpace)
+        store.setHitResult(hitResult)
+        // updateAllAnchorMeshes called here later
+        renderer.render(scene, camera)
+      })
+4e. Implement ARCanvas.jsx:
+      - Create Three.js WebGLRenderer with xr.enabled = true
+      - Attach to canvas DOM element
+      - Call startXRSession on mount
+      - Call endXRSession on unmount
+4f. Implement FloorIndicator.jsx:
+      - Read hitResult from store
+      - Render pulsing ring mesh at hit position
+      - Animate pulse with sin wave on ring scale
+4g. Test on real Android phone: AR session opens, pulsing circle appears on floor
+```
+
+### Step 5 — Drawing Capture + Line Correction
+```
+5a. Implement lineCorrection.js fully (Section 3.4):
+      filterOutliers → correctLine → snapAngle
+      Use math.js: import { svd, mean, std } from 'mathjs'
+5b. Implement drawing.js (Section 3.3):
+      startStroke, addPoint, endStroke, renderRawStroke, renderCorrectedLine
+5c. Implement useDrawing.js hook:
+      - Attach touchstart/touchmove/touchend listeners to canvas
+      - On touch: raycast touch position against floor plane using hit-test result
+      - Project 2D screen touch to 3D floor point
+      - Call drawing.js functions
+5d. Implement StrokeOverlay.jsx:
+      - Show raw stroke line while drawing
+      - Show corrected line + endpoint sphere handles after endStroke
+      - Endpoint handles draggable via touchstart on sphere raycasting
+5e. Implement WallProperties.jsx:
+      - Height selector: 4 buttons (1.8 / 2.4 / 3.0 / 3.6)
+      - Type selector: 4 buttons (Solid / Glass / Mesh / Half)
+      - Colour: 8 colour swatches + hex input
+      - "Confirm Wall" button
+5f. Test: draw on floor → see raw stroke → see corrected straight line → see endpoint handles
+```
+
+### Step 6 — Wall Mesh + Local Anchors
+```
+6a. Implement partitionMesh.js (Section 3.5): buildWallMesh, updateMeshTransform
+6b. Implement anchors.js (Section 3.6): createLocalAnchor, updateAllAnchorMeshes
+6c. Wire "Confirm Wall" in DrawScreen:
+      1. Call buildWallMesh(wallProperties)
+      2. Call createLocalAnchor(start) + createLocalAnchor(end)
+      3. Call updateAllAnchorMeshes each frame
+      4. Add wall to store + save to IndexedDB
+6d. Add updateAllAnchorMeshes call in frameLoop.js animation loop
+6e. Test: confirm wall → BoxGeometry appears on floor → walk around → wall stays in place
+```
+
+### Step 7 — World Labs API + Video Recording
+```
+7a. Implement worldLabs.js (Section 3.9): uploadVideo, generateWorld, pollOperation
+7b. Implement mediaRecorder.js: startRecording, stopRecording, applyWatermark
+7c. Implement useWorldGeneration.js hook:
+      recordAndGenerate(): async function:
+        1. startRecording(canvas)
+        2. Wait for user to stop (expose stopRecording trigger)
+        3. blob = await stopRecording()
+        4. store.setWorldGenStatus('uploading')
+        5. { mediaAssetId } = await uploadVideo(blob)
+        6. store.setWorldGenStatus('generating')
+        7. { operationId } = await generateWorld(mediaAssetId, ...)
+        8. world = await pollOperation(operationId, onProgress)
+        9. await saveWorld({ ...world, layoutId })
+        10. store.setCurrentWorld(world)
+        11. store.setWorldGenStatus('ready')
+        12. navigate('/world/' + worldId)
+7d. Implement GeneratingScreen.jsx:
+      - Show progress bar
+      - Show current status string from store.worldGenProgress
+      - Handle 'error' state with retry button
+7e. Test: record video → upload → poll → world URL returned → stored in IndexedDB
+```
+
+### Step 8 — Spark World Viewer
+```
+8a. Implement WorldCanvas.jsx:
+      import { SplatMesh, SparkRenderer } from '@sparkjsdev/spark'
+      import { SparkControls } from '@sparkjsdev/spark'
+      - Create SparkRenderer wrapping Three.js WebGLRenderer
+      - Load SplatMesh from world.splatUrl500k
+      - Load collider mesh as invisible THREE.Mesh (for floor)
+      - Instantiate SparkControls({ canvas }) → handles mobile joystick automatically
+      - Animation loop: controls.update(camera) each frame
+8b. Implement PartitionOverlay.jsx:
+      - Read currentLayout.walls from store
+      - For each wall: buildWallMesh(wall) → add to Spark scene
+      - Toggle visibility via isVisible prop
+      - NOTE: wall coordinates are in XR local-floor space, World Labs world has own coordinate system
+        → Use RELATIVE distances between walls (not absolute coords)
+        → Scale factor: measure known wall length in both spaces → compute ratio → apply
+8c. Implement WorldScreen.jsx:
+      - Load world from IndexedDB by worldId param
+      - Render WorldCanvas
+      - Toggle button (with/without partitions)
+      - Share button → builds URL → Web Share API
+8d. Test: open WorldScreen with generated world URL → walk through with joystick on phone
+```
+
+### Step 9 — Live AR Preview (Mode 2)
+```
+9a. Implement cloudAnchors.js (Section 3.7): hostAnchor, resolveAnchor, resolveAllAnchors
+9b. Wire cloud anchor hosting at end of Draw session:
+      After saving layout → for each wall: hostAnchor(localAnchor, session)
+      On success: updateLayout(wallId, { cloudAnchorIdStart, cloudAnchorIdEnd })
+9c. Implement LiveARScreen.jsx:
+      1. Load layout from IndexedDB
+      2. startXRSession()
+      3. Call resolveAllAnchors(walls, session)
+      4. For each resolved anchor pair: buildWallMesh → add to scene
+      5. Update meshes from anchor poses each frame
+      6. Show anchor resolution progress ("Resolving 3 of 5 walls...")
+      7. Handle resolve failures with fallback to local coords
+9d. Implement WallInfoSheet.jsx:
+      - Slides up from bottom when wall tapped
+      - Shows: type, colour, height, door status
+      - Colour/type edit → updateWall in store → updateLayout in IndexedDB
+9e. Test: Draw walls in Mode 1 → close app → reopen LiveARScreen → walls re-appear
+```
+
+### Step 10 — Polish + Edge Cases
+```
+10a. Implement ARUnsupportedBanner.jsx
+10b. Add device compatibility check in App.jsx: checkXRSupport on mount
+10c. Implement anchor resolution timeout UI (30s → show guidance)
+10d. Add anchor drift recalibration stub (store offset, apply to all meshes)
+10e. Implement ShareCard.jsx with WhatsApp deeplink
+10f. Test PWA install on Android: Add to Home Screen → opens fullscreen
+```
+
+---
+
+## 7. Edge Case Handling
+
+### Anchor Failure
+```
+Condition: resolveAnchor returns null (timeout or error state)
+Handler:
+  1. Load wall.startLocal + wall.endLocal from IndexedDB
+  2. Place wall mesh at stored local coordinates
+  3. Render wall with dashed orange outline (visual indicator: estimated position)
+  4. Show toast: "Wall position estimated — walk around to improve accuracy"
+  5. Keep polling in background — if anchor resolves later, snap mesh to real position
+```
+
+### No Floor Detection
+```
+Condition: getHitTestResult returns null for > 5 seconds
+Handler:
+  1. Show overlay: "Point camera slowly at floor"
+  2. Increase FloorIndicator opacity animation to draw attention
+  3. If still null after 15s: show "Low texture floor detected" + tips (add mat, papers)
+  4. Do not allow startStroke() until hitResult is non-null
+```
+
+### Low Light
+```
+Condition: ARCore tracking state degrades (xrFrame.session.visibilityState)
+Handler:
+  1. Monitor session.visibilityState — if 'hidden' or tracking lost: pause anchor updates
+  2. Show banner: "Tracking paused — increase lighting"
+  3. Resume updates when tracking restored
+  Note: WebXR does not expose light level directly — use visibilityState as proxy
+```
+
+### World Labs API Failure
+```
+Condition: generateWorld throws or pollOperation times out
+Handler:
+  1. Set store.worldGenStatus = 'error'
+  2. Show error message from thrown Error
+  3. Show "Retry" button → re-run useWorldGeneration from uploadVideo step
+  4. Preserve videoBlob in store so re-upload doesn't need re-record
+  5. Show "Save video" button → let user download raw recording as fallback
+```
+
+### PCA SVD Failure
+```
+Condition: math.svd throws (malformed matrix, < 2 points after filter)
+Handler:
+  1. Catch error in correctLine()
+  2. Fallback: return { start: rawPoints[0], end: rawPoints[last], length, angle }
+  3. Log to store.debugErrors[]
+  4. No UI error shown — fallback is good enough
+```
+
+### IndexedDB Unavailable
+```
+Condition: initDB() throws (private browsing, storage quota exceeded)
+Handler:
+  1. Set module flag: DB_AVAILABLE = false
+  2. All storage calls become no-ops returning undefined/[]
+  3. Show persistent banner: "Storage unavailable — data will not be saved"
+  4. App still functions for current session only
+```
+
+### MediaRecorder Not Supported
+```
+Condition: typeof MediaRecorder === 'undefined' OR canvas.captureStream fails
+Handler:
+  1. Disable "Record Tour" button
+  2. Show tooltip: "Recording not supported on this browser"
+  3. Mode 3 falls back to: upload a video file from camera roll instead
+```
+
+### WebXR Anchors Feature Missing
+```
+Condition: 'anchors' not in session.enabledFeatures after session start
+Handler:
+  1. Set store.anchorsSupported = false
+  2. Use session-only local anchors only (no Cloud Anchor hosting)
+  3. Show banner: "Persistent anchors unavailable — walls reset on app restart"
+  4. Hide "Live AR Preview" mode card on ProjectScreen
+```
+
+---
+
+## 8. Minimal Code Skeletons
+
+### 8.1 WebXR Session Start
+```javascript
+// src/xr/session.js
+export async function startXRSession(canvasRef) {
+  const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true })
+  renderer.xr.enabled = true
+
+  const session = await navigator.xr.requestSession('immersive-ar', {
+    requiredFeatures: ['hit-test', 'anchors'],
+    optionalFeatures: ['dom-overlay'],
+    domOverlay: { root: document.getElementById('ar-ui') }
+  })
+
+  renderer.xr.setReferenceSpaceType('local-floor')
+  await renderer.xr.setSession(session)
+
+  const refSpace = await session.requestReferenceSpace('local-floor')
+  const hitTestSource = await initHitTest(session)
+
+  useAppStore.getState().setXRSession(session)
+  useAppStore.getState().setXRRefSpace(refSpace)
+
+  startFrameLoop(session, renderer, refSpace, hitTestSource)
+  return session
+}
+```
+
+### 8.2 Frame Loop
+```javascript
+// src/xr/frameLoop.js
+export function startFrameLoop(session, renderer, refSpace, hitTestSource) {
+  const { scene, camera } = getThreeScene()
+
+  renderer.setAnimationLoop((time, xrFrame) => {
+    if (!xrFrame) return
+
+    // 1. Hit test
+    const hitResult = getHitTestResult(xrFrame, refSpace, hitTestSource)
+    useAppStore.getState().setHitResult(hitResult)
+
+    // 2. Update anchor meshes
+    const { walls, localAnchors, meshMap } = useAppStore.getState()
+    updateAllAnchorMeshes(xrFrame, refSpace, walls, meshMap)
+
+    // 3. Render
+    renderer.render(scene, camera)
+  })
+}
+```
+
+### 8.3 PCA Core
+```javascript
+// src/utils/lineCorrection.js
+import { svd, mean } from 'mathjs'
+
+export function correctLine(points3D) {
+  if (points3D.length < 2) return null
+  const pts = points3D.map(p => [p.x, p.z])
+  const filtered = filterOutliers(pts)
+  if (filtered.length < 2) return null
+
+  const cx = mean(filtered.map(p => p[0]))
+  const cz = mean(filtered.map(p => p[1]))
+  const centered = filtered.map(p => [p[0] - cx, p[1] - cz])
+
+  const cov = [
+    [mean(centered.map(p => p[0]*p[0])), mean(centered.map(p => p[0]*p[1]))],
+    [mean(centered.map(p => p[1]*p[0])), mean(centered.map(p => p[1]*p[1]))]
+  ]
+
+  try {
+    const { U, S, V } = svd(cov)
+    const [dx, dz] = [V[0][0], V[1][0]]
+
+    const projs = filtered.map(p => p[0]*dx + p[1]*dz)
+    const minP = Math.min(...projs)
+    const maxP = Math.max(...projs)
+
+    const floorY = points3D[0].y
+    return {
+      start: new THREE.Vector3(cx + minP*dx, floorY, cz + minP*dz),
+      end:   new THREE.Vector3(cx + maxP*dx, floorY, cz + maxP*dz),
+      length: Math.abs(maxP - minP),
+      angle:  Math.atan2(dz, dx) * (180 / Math.PI)
+    }
+  } catch {
+    const first = points3D[0], last = points3D[points3D.length - 1]
+    return { start: first, end: last, length: first.distanceTo(last), angle: 0 }
+  }
+}
+```
+
+### 8.4 Zustand Store Skeleton
+```javascript
+// src/store/useAppStore.js
+import { create } from 'zustand'
+
+export const useAppStore = create((set, get) => ({
+  projects: [],
+  currentProject: null,
+  currentLayout: null,
+  walls: [],
+  pendingLine: null,
+  xrSession: null,
+  xrRefSpace: null,
+  arSupported: false,
+  xrError: null,
+  isDrawing: false,
+  currentStroke: null,
+  selectedWall: null,
+  localAnchors: new Map(),
+  meshMap: new Map(),
+  anchorErrors: [],
+  worldGenStatus: 'idle',
+  worldGenProgress: null,
+  currentWorld: null,
+  activeModal: null,
+  wallPropertiesDraft: { height: 2.4, type: 'solid', colour: '#ffffff' },
+
+  setCurrentProject: (p) => set({ currentProject: p }),
+  setCurrentLayout: (l) => set({ currentLayout: l }),
+  addWall: (w) => set(s => ({ walls: [...s.walls, w] })),
+  updateWall: (id, partial) => set(s => ({
+    walls: s.walls.map(w => w.id === id ? { ...w, ...partial } : w)
+  })),
+  removeWall: (id) => set(s => ({ walls: s.walls.filter(w => w.id !== id) })),
+  setXRSession: (s) => set({ xrSession: s }),
+  setXRRefSpace: (rs) => set({ xrRefSpace: rs }),
+  setPendingLine: (l) => set({ pendingLine: l }),
+  setIsDrawing: (v) => set({ isDrawing: v }),
+  setSelectedWall: (w) => set({ selectedWall: w }),
+  addLocalAnchor: (wallId, anchors) => set(s => {
+    const m = new Map(s.localAnchors)
+    m.set(wallId, anchors)
+    return { localAnchors: m }
+  }),
+  addMeshToMap: (wallId, mesh) => set(s => {
+    const m = new Map(s.meshMap)
+    m.set(wallId, mesh)
+    return { meshMap: m }
+  }),
+  setWorldGenStatus: (status) => set({ worldGenStatus: status }),
+  setWorldGenProgress: (p) => set({ worldGenProgress: p }),
+  setCurrentWorld: (w) => set({ currentWorld: w }),
+  setActiveModal: (m) => set({ activeModal: m }),
+}))
+```
+
+### 8.5 IndexedDB Schema
+```javascript
+// src/db/schema.js
+export const DB_NAME = 'partitionAR_db'
+export const DB_VERSION = 1
+export const STORES = { PROJECTS: 'projects', LAYOUTS: 'layouts', WORLDS: 'worlds', SESSIONS: 'sessions' }
+
+export function upgrade(db) {
+  if (!db.objectStoreNames.contains(STORES.PROJECTS)) {
+    db.createObjectStore(STORES.PROJECTS, { keyPath: 'id' })
+  }
+  if (!db.objectStoreNames.contains(STORES.LAYOUTS)) {
+    const ls = db.createObjectStore(STORES.LAYOUTS, { keyPath: 'id' })
+    ls.createIndex('projectId', 'projectId', { unique: false })
+  }
+  if (!db.objectStoreNames.contains(STORES.WORLDS)) {
+    const ws = db.createObjectStore(STORES.WORLDS, { keyPath: 'id' })
+    ws.createIndex('layoutId', 'layoutId', { unique: false })
+  }
+  if (!db.objectStoreNames.contains(STORES.SESSIONS)) {
+    db.createObjectStore(STORES.SESSIONS, { keyPath: 'id' })
+  }
+}
+```
+
+### 8.6 World Labs Poll
+```javascript
+// src/api/worldLabs.js (pollOperation)
+export async function pollOperation(operationId, onProgress) {
+  const MAX_POLLS = 90 // 15 minutes at 10s interval
+  let polls = 0
+
+  while (polls < MAX_POLLS) {
+    await new Promise(r => setTimeout(r, 10000))
+    polls++
+
+    const res = await axios.get(
+      `${BASE_URL}/operations/${operationId}`,
+      { headers: { Authorization: `Bearer ${API_KEY}` } }
+    )
+    const op = res.data
+
+    if (op.metadata?.progress) {
+      onProgress(op.metadata.progress.status, op.metadata.progress.description)
+    }
+
+    if (op.done) {
+      if (op.error) throw new Error(op.error)
+      const r = op.response
+      return {
+        worldId: r.id,
+        splatUrl500k: r.assets.splats.spz_urls['500k'],
+        splatUrlFullRes: r.assets.splats.spz_urls['full_res'],
+        colliderMeshUrl: r.assets.mesh.collider_mesh_url,
+        panoramaUrl: r.assets.imagery.pano_url,
+        worldMarbleUrl: r.world_marble_url
+      }
+    }
+  }
+
+  throw new Error('timeout')
+}
+```
+
+---
+
+## 9. Package.json — Final Dependency List
+
+```json
+{
+  "dependencies": {
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-router-dom": "^6.26.0",
+    "three": "^0.165.0",
+    "@sparkjsdev/spark": "latest",
+    "zustand": "^4.5.0",
+    "axios": "^1.7.0",
+    "framer-motion": "^11.0.0",
+    "idb": "^8.0.0",
+    "mathjs": "^13.0.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.0",
+    "vite": "^5.4.0",
+    "vite-plugin-pwa": "^0.20.0",
+    "workbox-window": "^7.1.0",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.0",
+    "autoprefixer": "^10.4.0"
+  }
+}
+```
+
+---
+
+## 10. Environment Variables
+
+```bash
+# .env.local — never commit this file
+VITE_WORLD_LABS_API_KEY=        # From worldlabs.ai developer dashboard
+VITE_GOOGLE_CLOUD_API_KEY=      # From Google Cloud Console > ARCore API > Credentials
+VITE_APP_NAME=PartitionAR
+VITE_APP_URL=https://your-domain.vercel.app
+```
+
+---
+
+## 11. vite.config.js
+
+```javascript
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import { VitePWA } from 'vite-plugin-pwa'
+
+export default defineConfig({
+  plugins: [
+    react(),
+    VitePWA({
+      registerType: 'autoUpdate',
+      includeAssets: ['icons/*', 'fonts/*'],
+      manifest: {
+        name: 'PartitionAR',
+        short_name: 'PartitionAR',
+        theme_color: '#0a0a0b',
+        background_color: '#0a0a0b',
+        display: 'standalone',
+        orientation: 'portrait',
+        scope: '/',
+        start_url: '/',
+        icons: [
+          { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }
+        ]
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        runtimeCaching: [
+          {
+            urlPattern: /^https:\/\/api\.worldlabs\.ai\/.*/i,
+            handler: 'NetworkOnly'
+          }
+        ]
+      }
+    })
+  ]
+})
+```

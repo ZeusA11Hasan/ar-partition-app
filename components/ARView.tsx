@@ -3,8 +3,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { ARButton } from 'three/examples/jsm/webxr/ARButton.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { ARPartition, PartitionSettings } from './ARPartition';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { useFPSController } from '@/hooks/useFPSController';
+import { useJoystickControls } from '@/hooks/useJoystickControls';
+import { useTouchLook } from '@/hooks/useTouchLook';
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -149,6 +153,21 @@ export default function ARView() {
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const reticleRef = useRef<THREE.Mesh | null>(null);
 
+    // Navigation Controls
+    const orbitControlsRef = useRef<OrbitControls | null>(null);
+    const [navMode, setNavMode] = useState<'edit' | 'walk'>('edit');
+    // ── navModeRef: ref so animation loop reads live value (no stale closure) ──
+    const navModeRef = useRef<'edit' | 'walk'>('edit');
+    const [isPointerLocked, setIsPointerLocked] = useState(false);
+    const lastTimeRef = useRef<number>(performance.now());
+
+    // ── FPS Controller: unified keyboard + mouse-look + movement per frame ──
+    const fpsController = useFPSController();
+    // ── Joystick writes into the same movementInput ref as keyboard ──
+    const { joystickContainerRef } = useJoystickControls(fpsController.movementInput, navMode === 'walk');
+    // ── Mobile touch-look (right-half of screen) ──
+    useTouchLook(cameraRef.current, navMode === 'walk');
+
     // Wall registry: wallId → { mesh, startAnchor, endAnchor }
     const wallMeshesRef = useRef<Map<string, DrawnWall>>(new Map());
     const wallAnchorsRef = useRef<Map<string, WallAnchors>>(new Map());
@@ -211,6 +230,41 @@ export default function ARView() {
 
     const settingsRef = useRef({ frameColor, numPanels });
     useEffect(() => { settingsRef.current = { frameColor, numPanels }; }, [frameColor, numPanels]);
+
+    // ── Keep navModeRef in sync with navMode state ────────────────────────────
+    useEffect(() => {
+        navModeRef.current = navMode;
+    }, [navMode]);
+
+    // ── Controls lifecycle: OrbitControls ↔ FPS Controller ─────────────────
+    useEffect(() => {
+        if (navMode === 'walk') {
+            console.log('[System] WALK MODE ENABLED — disabling OrbitControls');
+            // Hard-disable OrbitControls so it cannot capture mouse events
+            if (orbitControlsRef.current) orbitControlsRef.current.enabled = false;
+            fpsController.resetVelocity();
+            if (cameraRef.current) {
+                cameraRef.current.position.y = 1.6;
+                // Sync yaw/pitch so camera doesn't snap when entering walk mode
+                fpsController.syncFromCamera(cameraRef.current);
+            }
+        } else {
+            console.log('[System] EDIT MODE ENABLED — restoring OrbitControls');
+            // Release pointer lock and re-enable orbit
+            fpsController.unlock();
+            fpsController.resetVelocity();
+            if (orbitControlsRef.current) {
+                orbitControlsRef.current.enabled = !isLineMode;
+            }
+        }
+    }, [navMode]);
+
+    // Keep OrbitControls disabled while drawing (separate concern)
+    useEffect(() => {
+        if (orbitControlsRef.current && navMode === 'edit') {
+            orbitControlsRef.current.enabled = !isLineMode;
+        }
+    }, [isLineMode, navMode]);
 
     // ─── DRAWING CLEANUP ───────────────────────────────────────────────────────
 
@@ -542,6 +596,8 @@ export default function ARView() {
     // ─── TOUCH HANDLERS ───────────────────────────────────────────────────────
 
     const onTouchStart = (event: React.TouchEvent | React.MouseEvent) => {
+        if (navMode === 'walk') return;
+
         const camera = cameraRef.current;
         const scene = sceneRef.current;
         if (!camera || !scene) return;
@@ -635,7 +691,7 @@ export default function ARView() {
     };
 
     const onTouchMove = (event: React.TouchEvent | React.MouseEvent) => {
-        if (!isCurrentlyDrawing || !isLineMode) return;
+        if (!isCurrentlyDrawing || !isLineMode || navMode === 'walk') return;
         const camera = cameraRef.current;
         const scene = sceneRef.current;
         if (!camera || !scene) return;
@@ -749,6 +805,23 @@ export default function ARView() {
         containerRef.current.appendChild(renderer.domElement);
         rendererRef.current = renderer;
 
+        // Initialize Controls
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = navMode === 'edit';
+        orbitControlsRef.current = orbitControls;
+
+        // ── Track pointer lock state for UI (lock/unlock button label) ─────────────
+        // useFPSController handles the actual requestPointerLock + mousemove.
+        // Here we just sync the React state for the button label.
+        const onPointerLockChange = () => {
+            const locked = document.pointerLockElement === renderer.domElement;
+            setIsPointerLocked(locked);
+            console.log('[FPS] pointerlockchange — locked:', locked);
+        };
+        document.addEventListener('pointerlockchange', onPointerLockChange);
+
         const previewModel = new ARPartition({ frameColor: settingsRef.current.frameColor, numPanels: settingsRef.current.numPanels });
         scene.add(previewModel);
         previewModelRef.current = previewModel;
@@ -780,6 +853,20 @@ export default function ARView() {
         // No scene objects are re-created per frame — only positions are updated.
 
         renderer.setAnimationLoop((_timestamp: number, frame: any) => {
+            const time = performance.now();
+            const delta = (time - lastTimeRef.current) / 1000;
+            lastTimeRef.current = time;
+
+            // ── Animation loop: Walk Mode uses FPS controller, Edit uses OrbitControls ──
+            if (navModeRef.current === 'walk') {
+                // Double-guard: ensure OrbitControls cannot touch the camera
+                if (orbitControlsRef.current?.enabled) orbitControlsRef.current.enabled = false;
+                // FPS controller applies mouse-look rotation + WASD/joystick movement
+                fpsController.updateFrame(camera, delta);
+            } else {
+                orbitControlsRef.current?.update();
+            }
+
             if (frame) {
                 // Use 'local-floor' reference space for better ground-plane stability
                 const referenceSpace = renderer.xr.getReferenceSpace()!;
@@ -938,6 +1025,7 @@ export default function ARView() {
 
         return () => {
             window.removeEventListener('resize', handleResize);
+            document.removeEventListener('pointerlockchange', onPointerLockChange);
             renderer.setAnimationLoop(null);
             renderer.dispose();
             if (arButton.parentNode) arButton.parentNode.removeChild(arButton);
@@ -987,19 +1075,6 @@ export default function ARView() {
 
     if (!isMounted) return <div className="fixed inset-0 bg-black" />;
 
-    if (!arSupported) {
-        return (
-            <div className="fixed inset-0 bg-black text-white flex flex-col items-center justify-center p-8 text-center font-sans tracking-wide">
-                <span className="text-4xl mb-4">📹</span>
-                <h2 className="text-xl font-black uppercase tracking-widest mb-2 text-rose-500">Device Unsupported</h2>
-                <p className="text-sm text-white/60 mb-6 max-w-sm">WebXR Immersive-AR is not supported on this device. You cannot place elements in the real world.</p>
-                <div className="bg-white/10 p-4 rounded-2xl w-full max-w-sm border border-white/5 shadow-2xl">
-                    <span className="text-emerald-400 font-bold block mb-2 text-xs uppercase tracking-widest">Available Options</span>
-                    <button onClick={() => setMode3Active(true)} className="w-full px-4 py-3 bg-emerald-600 text-white rounded-xl shadow-lg font-bold text-xs uppercase tracking-wide">Use World Labs (Mode 3)</button>
-                </div>
-            </div>
-        );
-    }
 
     // ─── RENDER ───────────────────────────────────────────────────────────────
 
@@ -1017,6 +1092,9 @@ export default function ARView() {
                 onTouchEnd={onTouchEnd}
             />
 
+            {/* Mobile Joystick Container */}
+            <div ref={joystickContainerRef} className="absolute bottom-10 left-10 w-40 h-40 z-30 pointer-events-auto" />
+
             {/* Status bar */}
             <div className="absolute top-12 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 pointer-events-none z-10 w-full">
                 <div className="text-white bg-black/80 px-4 py-2 rounded-lg font-mono text-[10px] border border-blue-500/30 mb-2 shadow-2xl flex flex-col items-center">
@@ -1025,6 +1103,35 @@ export default function ARView() {
                         <div className="w-full bg-gray-700 h-1 mt-1 rounded-full overflow-hidden">
                             <div className="bg-blue-400 h-full transition-all duration-300" style={{ width: `${(resolveProgress.resolved / resolveProgress.total) * 100}%` }} />
                         </div>
+                    )}
+                </div>
+
+                <div className="flex gap-2 mb-2 pointer-events-auto">
+                    <button 
+                        onClick={() => setNavMode('edit')}
+                        className={`px-3 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-widest transition-all ${navMode === 'edit' ? 'bg-blue-600 text-white shadow-lg' : 'bg-black/60 text-white/60 border border-white/10'}`}
+                    >
+                        Edit Mode
+                    </button>
+                    <button 
+                        onClick={() => setNavMode('walk')}
+                        className={`px-3 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-widest transition-all ${navMode === 'walk' ? 'bg-emerald-600 text-white shadow-lg' : 'bg-black/60 text-white/60 border border-white/10'}`}
+                    >
+                        Walk Mode
+                    </button>
+                    {navMode === 'walk' && (
+                        <button 
+                            onClick={() => {
+                                const canvas = rendererRef.current?.domElement;
+                                if (!canvas) return;
+                                isPointerLocked
+                                    ? fpsController.unlock()
+                                    : fpsController.lock(canvas);
+                            }}
+                            className={`px-3 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-widest transition-all ${isPointerLocked ? 'bg-orange-600 text-white' : 'bg-white/10 text-white border border-white/10'}`}
+                        >
+                            {isPointerLocked ? 'Unlock Mouse' : 'Lock Mouse'}
+                        </button>
                     )}
                 </div>
 

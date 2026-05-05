@@ -1249,4 +1249,73 @@ export default defineConfig({
     })
   ]
 })
-```
+```You are a senior AR systems engineer.
+
+The system is already stable with:
+
+* Cloud Anchors
+* Retry logic
+* Recalibration
+* RAG pipeline
+
+Now apply FINAL production hardening.
+
+---
+
+## REQUIRED FIXES:
+
+### 1. Anchor Jitter Filtering
+
+* Ignore movements < 5mm between frames
+
+---
+
+### 2. Smooth Snap on Resolve
+
+* When anchor resolves:
+  interpolate position instead of instant jump
+
+---
+
+### 3. Reference Wall System
+
+* Choose first wall as reference
+* Other walls positioned relative to it
+* Prevent cumulative drift
+
+---
+
+### 4. Timeout UX Improvements
+
+* Add user guidance messages after 10s, 20s, 30s
+
+---
+
+### 5. RAG Hard Guard
+
+* If no chunks retrieved → return fallback message
+
+---
+
+### 6. Device Capability Check
+
+* Disable AR modes if unsupported
+
+---
+
+### 7. Minimal Mode 3 Completion
+
+* Implement video upload + processing state (no need full viewer yet)
+
+---
+
+## GOAL:
+
+System should feel:
+
+* Stable (no jitter)
+* Predictable (no confusion)
+* Reliable across devices
+* Trustworthy (AI + AR)
+
+Do not rewrite system — only extend.

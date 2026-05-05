@@ -34,7 +34,7 @@ export function useJoystickControls(
 
         managerRef.current = manager;
 
-        manager.on('move', (_evt: any, data: any) => {
+        (manager as any).on('move', (_evt: any, data: any) => {
             if (!data?.vector) return;
 
             const { x, y } = data.vector;
@@ -47,7 +47,7 @@ export function useJoystickControls(
             movementInput.current.right    = x >  0.2;
         });
 
-        manager.on('end', () => {
+        (manager as any).on('end', () => {
             console.log('[Joystick] Released');
             movementInput.current.forward  = false;
             movementInput.current.backward = false;
